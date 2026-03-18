@@ -14,7 +14,7 @@ from datetime import datetime
 GEMINI_API_KEY = "AIzaSyBCnaWAXbo11bK11aMxO4H8P0RQt6eYmL8" 
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-2.5-flash')
+model = genai.GenerativeModel('gemini-1.5-flash')
 
 KNOWLEDGE_FILE = "sop_kb.md"
 
