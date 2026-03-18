@@ -8,22 +8,24 @@ import os
 from datetime import datetime
 
 # ==========================================
-# 1. 系統初始化與 Secrets 讀取 (修正版)
+# 1. 系統初始化與 Secrets 讀取 (直接讀取版)
 # ==========================================
 st.set_page_config(page_title="SOP 知識檢索輔助系統", layout="wide")
 
-# 檢查必要的 Secrets
-if "GROQ_API_KEY" not in st.secrets:
-    st.error("❌ 遺失 Secrets 設定：GROQ_API_KEY")
+# 直接從最外層讀取，不進到 connections 層級
+if "GROQ_API_KEY" not in st.secrets or "GSHEETS_URL" not in st.secrets:
+    st.error("❌ Secrets 讀取失敗！請確保 Secrets 中有 GROQ_API_KEY 和 GSHEETS_URL")
     st.stop()
 
-# 檢查 GSheets 設定是否存在於正確的層級
+# 取得網址與金鑰
+GSHEETS_URL = st.secrets["GSHEETS_URL"]
+client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+
 try:
-    # 直接從層級式 Secrets 抓取網址
-    GSHEETS_URL = st.secrets["connections"]["gsheets"]["spreadsheet"]
+    # 這裡手動建立連線，不依賴 st.connection 的自動 Secrets 匹配
     conn = st.connection("gsheets", type=GSheetsConnection)
 except Exception as e:
-    st.error(f"❌ Google Sheets 設定錯誤或遺失。請確保 Secrets 包含 [connections.gsheets] 區塊。錯誤訊息: {e}")
+    st.error(f"❌ Google Sheets 連線失敗: {e}")
     st.stop()
 
 client = Groq(api_key=st.secrets["GROQ_API_KEY"])
