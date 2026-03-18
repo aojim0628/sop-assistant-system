@@ -1,5 +1,6 @@
 import streamlit as st
 from groq import Groq
+import gspread
 import pandas as pd
 import json
 import re
@@ -7,31 +8,35 @@ import os
 from datetime import datetime
 
 # ==========================================
-# 1. 系統初始化與 Secrets 檢查 (直接讀取版)
+# 1. 系統初始化與 Google 連線
 # ==========================================
 st.set_page_config(page_title="SOP 知識檢索輔助系統", layout="wide")
 
-# 確保 Secrets 存在於最外層
-if "GROQ_API_KEY" not in st.secrets or "GSHEETS_URL" not in st.secrets:
-    st.error("❌ Secrets 讀取失敗！請確保已在 Streamlit Cloud 設定 GROQ_API_KEY 與 GSHEETS_URL。")
+# 初始化 Google Sheets 連線 (gspread)
+@st.cache_resource
+def get_gsheets_client():
+    try:
+        # 從 Secrets 讀取多行 JSON 字串
+        service_account_info = json.loads(st.secrets["GOOGLE_SERVICE_ACCOUNT"])
+        return gspread.service_account_from_dict(service_account_info)
+    except Exception as e:
+        st.error(f"❌ JSON 格式解析失敗，請檢查 Secrets 設定: {e}")
+        st.stop()
+
+try:
+    gc = get_gsheets_client()
+    sh = gc.open_by_url(st.secrets["GSHEETS_URL"])
+    worksheet = sh.get_worksheet(0) # 寫入第一個工作表
+except Exception as e:
+    st.error(f"❌ 雲端資料庫連線失敗: {e}\n請確認試算表已『共用』給 JSON 裡的 client_email。")
     st.stop()
 
-# 初始化 Groq 客戶端
+# 初始化 Groq
 client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
-# 將 Google Sheets 網址轉換為可以直接下載 CSV 的連結 (繞過 API 驗證)
-def get_csv_url(gsheet_url):
-    try:
-        # 抓取試算表 ID 並轉換為 export 格式
-        base = gsheet_url.split('/edit')[0]
-        return f"{base}/export?format=csv"
-    except:
-        return gsheet_url
-
 # ==========================================
-# 2. 核心邏輯功能
+# 2. 核心邏輯功能 (檢索與判斷)
 # ==========================================
-
 KNOWLEDGE_FILE = "sop_kb.md"
 
 @st.cache_data
@@ -76,8 +81,7 @@ def check_password():
             st.subheader("🔐 系統存取控制")
             password = st.text_input("請輸入訪問密碼", type="password")
             if st.button("確認"):
-                correct_pw = st.secrets.get("ACCESS_PASSWORD", "ntue123")
-                if password == correct_pw:
+                if password == st.secrets.get("ACCESS_PASSWORD", "ntue123"):
                     st.session_state["password_correct"] = True
                     st.rerun()
                 else:
@@ -86,7 +90,7 @@ def check_password():
     return True
 
 # ==========================================
-# 3. UI 介面與流程
+# 3. UI 介面與測驗流程
 # ==========================================
 if check_password():
     st.markdown("""
@@ -136,14 +140,14 @@ if check_password():
                     st.rerun()
     else:
         with st.sidebar:
-            st.header(f"👤 使用者：{st.session_state.user_name}")
+            st.header(f"👤：{st.session_state.user_name}")
             if not st.session_state.is_finished:
                 curr_idx = st.session_state.current_step_idx
                 curr_key = task_list[curr_idx]
                 st.divider()
                 st.write(f"📊 任務進度：{curr_idx + 1} / {len(task_list)}")
                 st.progress((curr_idx + 1) / len(task_list))
-                st.info(f"目前任務：\n{tasks[curr_key]}")
+                st.info(f"任務：{tasks[curr_key]}")
                 
                 user_ans = st.text_area("您的回答：", key=f"ans_{curr_idx}", height=120)
                 if st.button("✅ 儲存並下一題"):
@@ -153,32 +157,38 @@ if check_password():
                             st.session_state.current_step_idx += 1
                             st.rerun()
                         else:
-                            st.session_state.is_finished = True
-                            st.rerun()
+                            # 測驗結束：自動上傳到 Google Sheets
+                            try:
+                                with st.spinner("💾 正在自動同步實驗數據..."):
+                                    duration = datetime.now() - st.session_state.enter_time
+                                    duration_str = f"{int(duration.total_seconds() // 60):02d}:{int(duration.total_seconds() % 60):02d}"
+                                    
+                                    # 整理要上傳的資料列
+                                    rows_to_append = []
+                                    for k, v in st.session_state.answers.items():
+                                        rows_to_append.append([
+                                            st.session_state.user_name,
+                                            k,
+                                            v,
+                                            duration_str,
+                                            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                        ])
+                                    
+                                    # 寫入最後一行
+                                    worksheet.append_rows(rows_to_append)
+                                    
+                                    st.session_state.is_finished = True
+                                    st.rerun()
+                            except Exception as e:
+                                st.error(f"同步失敗，請截圖保留結果: {e}")
             else:
-                st.success("🎉 測驗已完成！")
-                # 顯示答題摘要與下載
-                final_df = pd.DataFrame([{"任務": k, "回答": v} for k, v in st.session_state.answers.items()])
-                st.dataframe(final_df, use_container_width=True)
-                
-                duration = datetime.now() - st.session_state.enter_time
-                duration_str = f"{int(duration.total_seconds() // 60):02d}:{int(duration.total_seconds() % 60):02d}"
-                st.write(f"⏱️ 總耗時：{duration_str}")
-
-                st.download_button(
-                    label="📥 下載測驗結果 CSV",
-                    data=final_df.to_csv(index=False).encode('utf-8-sig'),
-                    file_name=f"result_{st.session_state.user_name}.csv",
-                    mime="text/csv"
-                )
-                
+                st.success("🎉 測驗已完成，數據已自動同步至 Google Sheets！")
                 if st.button("🔄 重新開始"):
                     st.session_state.clear()
                     st.rerun()
 
-        # 主畫面：聊天檢索介面
+        # 主畫面：聊天檢索介面 (同之前邏輯)
         st.title("🔍 SOP 知識檢索輔助系統")
-        
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]):
                 if isinstance(msg["content"], list):
