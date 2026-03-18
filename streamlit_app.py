@@ -8,24 +8,25 @@ import os
 from datetime import datetime
 
 # ==========================================
-# 1. 系統初始化與錯誤檢查
+# 1. 系統初始化與 Secrets 讀取 (修正版)
 # ==========================================
 st.set_page_config(page_title="SOP 知識檢索輔助系統", layout="wide")
 
-# 安全檢查：確保 Secrets 都有填寫
-required_secrets = ["GROQ_API_KEY", "GSHEETS_URL", "ACCESS_PASSWORD"]
-for s in required_secrets:
-    if s not in st.secrets:
-        st.error(f"❌ 遺失 Secrets 設定：{s}。請至 Streamlit Cloud 設定。")
-        st.stop()
+# 檢查必要的 Secrets
+if "GROQ_API_KEY" not in st.secrets:
+    st.error("❌ 遺失 Secrets 設定：GROQ_API_KEY")
+    st.stop()
 
-# 初始化 Groq 與 Google Sheets 連線
+# 檢查 GSheets 設定是否存在於正確的層級
 try:
-    client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+    # 直接從層級式 Secrets 抓取網址
+    GSHEETS_URL = st.secrets["connections"]["gsheets"]["spreadsheet"]
     conn = st.connection("gsheets", type=GSheetsConnection)
 except Exception as e:
-    st.error(f"❌ 連線初始化失敗: {e}")
+    st.error(f"❌ Google Sheets 設定錯誤或遺失。請確保 Secrets 包含 [connections.gsheets] 區塊。錯誤訊息: {e}")
     st.stop()
+
+client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
 # ==========================================
 # 2. 核心邏輯功能
@@ -67,7 +68,6 @@ def is_query_relevant(query):
     sop_keywords = ["會議", "會議室", "空間", "租借", "訪客", "nda", "換證", "資安", "保全", "報修", "故障", "it", "維修", "請假", "人事", "hr", "報銷", "核銷", "sop", "流程", "休假", "簽署", "單據"]
     return any(kw in query.strip().lower() for kw in sop_keywords)
 
-# 密碼檢查
 def check_password():
     if "password_correct" not in st.session_state:
         st.markdown("<br><br>", unsafe_allow_html=True)
@@ -76,7 +76,7 @@ def check_password():
             st.subheader("🔐 系統存取控制")
             password = st.text_input("請輸入訪問密碼", type="password")
             if st.button("確認"):
-                if password == st.secrets["ACCESS_PASSWORD"]:
+                if password == st.secrets.get("ACCESS_PASSWORD", "ntue123"):
                     st.session_state["password_correct"] = True
                     st.rerun()
                 else:
@@ -85,10 +85,9 @@ def check_password():
     return True
 
 # ==========================================
-# 3. UI 介面與流程
+# 3. UI 介面與測驗流程
 # ==========================================
 if check_password():
-    # 注入 CSS 樣式
     st.markdown("""
         <style>
         .stApp { background-color: #0e1117; color: white; }
@@ -106,7 +105,6 @@ if check_password():
         </style>
     """, unsafe_allow_html=True)
 
-    # 初始化會話狀態
     if "messages" not in st.session_state: st.session_state.messages = []
     if "is_started" not in st.session_state: st.session_state.is_started = False
     if "current_step_idx" not in st.session_state: st.session_state.current_step_idx = 0
@@ -136,7 +134,6 @@ if check_password():
                     st.session_state.enter_time = datetime.now() 
                     st.rerun()
     else:
-        # 側邊欄：進度與答題
         with st.sidebar:
             st.header(f"👤：{st.session_state.user_name}")
             if not st.session_state.is_finished:
@@ -155,7 +152,6 @@ if check_password():
                             st.session_state.current_step_idx += 1
                             st.rerun()
                         else:
-                            # 完成後傳送到 Google Sheets
                             try:
                                 with st.spinner("正在上傳數據至雲端..."):
                                     duration = datetime.now() - st.session_state.enter_time
@@ -171,10 +167,10 @@ if check_password():
                                             "時間戳記": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                         })
                                     
-                                    # 讀取並更新
-                                    df = conn.read(spreadsheet=st.secrets["GSHEETS_URL"])
+                                    # 使用修正後的 GSHEETS_URL 變數
+                                    df = conn.read(spreadsheet=GSHEETS_URL)
                                     updated_df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
-                                    conn.update(spreadsheet=st.secrets["GSHEETS_URL"], data=updated_df)
+                                    conn.update(spreadsheet=GSHEETS_URL, data=updated_df)
                                     
                                     st.session_state.is_finished = True
                                     st.rerun()
@@ -186,9 +182,8 @@ if check_password():
                     st.session_state.clear()
                     st.rerun()
 
-        # 主畫面：聊天檢索介面
         st.title("🔍 SOP 知識檢索輔助系統")
-        
+        # 聊天歷史顯示
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]):
                 if isinstance(msg["content"], list):
