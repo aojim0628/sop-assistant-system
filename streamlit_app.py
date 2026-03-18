@@ -1,6 +1,5 @@
 import streamlit as st
 from groq import Groq
-from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 import json
 import re
@@ -8,27 +7,26 @@ import os
 from datetime import datetime
 
 # ==========================================
-# 1. 系統初始化與 Secrets 讀取 (直接讀取版)
+# 1. 系統初始化與 Secrets 檢查 (直接讀取版)
 # ==========================================
 st.set_page_config(page_title="SOP 知識檢索輔助系統", layout="wide")
 
-# 直接從最外層讀取，不進到 connections 層級
+# 確保 Secrets 存在於最外層
 if "GROQ_API_KEY" not in st.secrets or "GSHEETS_URL" not in st.secrets:
-    st.error("❌ Secrets 讀取失敗！請確保 Secrets 中有 GROQ_API_KEY 和 GSHEETS_URL")
+    st.error("❌ Secrets 讀取失敗！請確保已在 Streamlit Cloud 設定 GROQ_API_KEY 與 GSHEETS_URL。")
     st.stop()
 
-# 取得網址與金鑰
-GSHEETS_URL = st.secrets["GSHEETS_URL"]
+# 初始化 Groq 客戶端
 client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
-try:
-    # 這裡手動建立連線，不依賴 st.connection 的自動 Secrets 匹配
-    conn = st.connection("gsheets", type=GSheetsConnection)
-except Exception as e:
-    st.error(f"❌ Google Sheets 連線失敗: {e}")
-    st.stop()
-
-client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+# 將 Google Sheets 網址轉換為可以直接下載 CSV 的連結 (繞過 API 驗證)
+def get_csv_url(gsheet_url):
+    try:
+        # 抓取試算表 ID 並轉換為 export 格式
+        base = gsheet_url.split('/edit')[0]
+        return f"{base}/export?format=csv"
+    except:
+        return gsheet_url
 
 # ==========================================
 # 2. 核心邏輯功能
@@ -78,7 +76,8 @@ def check_password():
             st.subheader("🔐 系統存取控制")
             password = st.text_input("請輸入訪問密碼", type="password")
             if st.button("確認"):
-                if password == st.secrets.get("ACCESS_PASSWORD", "ntue123"):
+                correct_pw = st.secrets.get("ACCESS_PASSWORD", "ntue123")
+                if password == correct_pw:
                     st.session_state["password_correct"] = True
                     st.rerun()
                 else:
@@ -87,7 +86,7 @@ def check_password():
     return True
 
 # ==========================================
-# 3. UI 介面與測驗流程
+# 3. UI 介面與流程
 # ==========================================
 if check_password():
     st.markdown("""
@@ -137,14 +136,14 @@ if check_password():
                     st.rerun()
     else:
         with st.sidebar:
-            st.header(f"👤：{st.session_state.user_name}")
+            st.header(f"👤 使用者：{st.session_state.user_name}")
             if not st.session_state.is_finished:
                 curr_idx = st.session_state.current_step_idx
                 curr_key = task_list[curr_idx]
                 st.divider()
                 st.write(f"📊 任務進度：{curr_idx + 1} / {len(task_list)}")
                 st.progress((curr_idx + 1) / len(task_list))
-                st.info(f"任務：{tasks[curr_key]}")
+                st.info(f"目前任務：\n{tasks[curr_key]}")
                 
                 user_ans = st.text_area("您的回答：", key=f"ans_{curr_idx}", height=120)
                 if st.button("✅ 儲存並下一題"):
@@ -154,38 +153,32 @@ if check_password():
                             st.session_state.current_step_idx += 1
                             st.rerun()
                         else:
-                            try:
-                                with st.spinner("正在上傳數據至雲端..."):
-                                    duration = datetime.now() - st.session_state.enter_time
-                                    duration_str = f"{int(duration.total_seconds() // 60):02d}:{int(duration.total_seconds() % 60):02d}"
-                                    
-                                    new_rows = []
-                                    for k, v in st.session_state.answers.items():
-                                        new_rows.append({
-                                            "使用者": st.session_state.user_name,
-                                            "任務": k,
-                                            "回答": v,
-                                            "總耗時": duration_str,
-                                            "時間戳記": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                        })
-                                    
-                                    # 使用修正後的 GSHEETS_URL 變數
-                                    df = conn.read(spreadsheet=GSHEETS_URL)
-                                    updated_df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
-                                    conn.update(spreadsheet=GSHEETS_URL, data=updated_df)
-                                    
-                                    st.session_state.is_finished = True
-                                    st.rerun()
-                            except Exception as e:
-                                st.error(f"上傳失敗：{e}")
+                            st.session_state.is_finished = True
+                            st.rerun()
             else:
-                st.success("🎉 測驗已完成，數據已同步至 Google Sheets！")
+                st.success("🎉 測驗已完成！")
+                # 顯示答題摘要與下載
+                final_df = pd.DataFrame([{"任務": k, "回答": v} for k, v in st.session_state.answers.items()])
+                st.dataframe(final_df, use_container_width=True)
+                
+                duration = datetime.now() - st.session_state.enter_time
+                duration_str = f"{int(duration.total_seconds() // 60):02d}:{int(duration.total_seconds() % 60):02d}"
+                st.write(f"⏱️ 總耗時：{duration_str}")
+
+                st.download_button(
+                    label="📥 下載測驗結果 CSV",
+                    data=final_df.to_csv(index=False).encode('utf-8-sig'),
+                    file_name=f"result_{st.session_state.user_name}.csv",
+                    mime="text/csv"
+                )
+                
                 if st.button("🔄 重新開始"):
                     st.session_state.clear()
                     st.rerun()
 
+        # 主畫面：聊天檢索介面
         st.title("🔍 SOP 知識檢索輔助系統")
-        # 聊天歷史顯示
+        
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]):
                 if isinstance(msg["content"], list):
@@ -203,7 +196,6 @@ if check_password():
                 else:
                     st.write(msg["content"])
 
-        # 快捷鍵區
         shortcut_query = None
         st.markdown('<div id="custom-bottom-bar">', unsafe_allow_html=True)
         btn_cols = st.columns(5)
@@ -214,7 +206,7 @@ if check_password():
         if btn_cols[4].button("📅 租借會議室"): shortcut_query = "租借會議室"
         st.markdown('</div>', unsafe_allow_html=True)
         
-        chat_input = st.chat_input("輸入關鍵字...")
+        chat_input = st.chat_input("輸入關鍵字搜尋...")
         final_query = shortcut_query if shortcut_query else chat_input
 
         if final_query:
