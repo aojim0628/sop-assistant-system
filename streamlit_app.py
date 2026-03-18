@@ -1,5 +1,5 @@
 import streamlit as st
-import google.generativeai as genai
+from groq import Groq
 import json
 import re
 import os
@@ -7,10 +7,10 @@ import pandas as pd
 from datetime import datetime
 
 # ==========================================
-# 1. 核心功能與 安全設定
+# 1. 核心功能與安全設定
 # ==========================================
 
-# 密碼檢查功能 (防路人甲)
+# 密碼檢查功能
 def check_password():
     if "password_correct" not in st.session_state:
         st.markdown("<br><br>", unsafe_allow_html=True)
@@ -19,7 +19,6 @@ def check_password():
             st.subheader("🔐 系統存取控制")
             password = st.text_input("請輸入訪問密碼", type="password")
             if st.button("確認"):
-                # 優先從 Secrets 讀取密碼，如果沒設定就預設為 "ntue123"
                 correct_pw = st.secrets.get("ACCESS_PASSWORD", "ntue123")
                 if password == correct_pw:
                     st.session_state["password_correct"] = True
@@ -29,14 +28,8 @@ def check_password():
         return False
     return True
 
-# 讀取 API KEY
-GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-genai.configure(api_key=GEMINI_API_KEY)
-
-# 修正模型名稱：改用最穩定的 1.5-flash 或最新的 2.0-flash-exp
-# 建議先用 'gemini-1.5-flash'，這是目前最通用的
-# 加上最新的小版本號，這通常能解決 404 問題
-model = genai.GenerativeModel('gemini-1.5-flash-pro')
+# 初始化 Groq 客戶端 (取代原有的 genai)
+client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
 KNOWLEDGE_FILE = "sop_kb.md"
 
@@ -48,7 +41,6 @@ def load_knowledge(file_path):
 
 MY_KNOWLEDGE_BASE = load_knowledge(KNOWLEDGE_FILE)
 
-# (其餘 retrieve_category_context 與 is_query_relevant 邏輯保持不變)
 def retrieve_category_context(query, full_text):
     if not full_text: return ""
     clean_query = query.strip().lower()
@@ -76,12 +68,11 @@ def is_query_relevant(query):
     return any(kw in query.strip().lower() for kw in sop_keywords)
 
 # ==========================================
-# 2. 啟動密碼鎖與 UI
+# 2. 啟動 UI
 # ==========================================
 st.set_page_config(page_title="SOP 知識檢索輔助系統", layout="wide")
 
 if check_password():
-    # --- 原本的 UI 程式碼開始 ---
     st.markdown("""
         <style>
         .stApp { background-color: #0e1117; color: white; }
@@ -100,12 +91,11 @@ if check_password():
         </style>
     """, unsafe_allow_html=True)
 
-    # 狀態初始化
-    if "is_started" not in st.session_state: st.session_state.is_started = False
-    if "user_name" not in st.session_state: st.session_state.user_name = ""
     if "messages" not in st.session_state: st.session_state.messages = []
-    if "answers" not in st.session_state: st.session_state.answers = {}
+    if "user_name" not in st.session_state: st.session_state.user_name = ""
+    if "is_started" not in st.session_state: st.session_state.is_started = False
     if "current_step_idx" not in st.session_state: st.session_state.current_step_idx = 0
+    if "answers" not in st.session_state: st.session_state.answers = {}
     if "is_finished" not in st.session_state: st.session_state.is_finished = False
 
     tasks = {
@@ -118,7 +108,6 @@ if check_password():
     }
     task_list = list(tasks.keys())
 
-    # 路由與主邏輯
     if not st.session_state.is_started:
         st.markdown("<br><br><br>", unsafe_allow_html=True)
         _, col_center, _ = st.columns([1, 1.5, 1])
@@ -195,7 +184,7 @@ if check_password():
 
         if final_query:
             st.session_state.messages.append({"role": "user", "content": final_query})
-            with st.spinner("Gemini 正在檢索..."):
+            with st.spinner("AI 正在極速檢索..."):
                 if not is_query_relevant(final_query):
                     st.session_state.messages.append({"role": "assistant", "content": "查無相關 SOP 資訊。"})
                 else:
@@ -207,17 +196,28 @@ if check_password():
                         "【輸出規範】：\n"
                         "1. 必須使用『繁體中文』(台灣術語)。\n"
                         "2. 嚴禁簡體字。\n"
-                        "3. 僅回傳 JSON 陣列，格式：[{\"title\":\"動作名稱\",\"content\":\"繁體說明\",\"owner\":\"對象\",\"time\":\"時限\"}]"
+                        "3. 僅回傳純 JSON 陣列，格式：[{\"title\":\"動作名稱\",\"content\":\"繁體說明\",\"owner\":\"對象\",\"time\":\"時限\"}]"
+                        "4. 不要輸出任何 JSON 以外的文字說明。"
                     )
                     try:
-                        response = model.generate_content(
-                            prompt,
-                            generation_config=genai.types.GenerationConfig(
-                                temperature=0,
-                                response_mime_type="application/json"
-                            )
+                        # 使用 Groq 的 Llama 3.3 模型
+                        chat_completion = client.chat.completions.create(
+                            messages=[{"role": "user", "content": prompt}],
+                            model="llama-3.3-70b-versatile",
+                            temperature=0,
+                            response_format={"type": "json_object"}
                         )
-                        raw_data = json.loads(response.text)
+                        
+                        # 解析回應內容
+                        res_text = chat_completion.choices[0].message.content
+                        res_data = json.loads(res_text)
+                        
+                        # 處理 Groq 有時會包一層 Key 的情況
+                        if isinstance(res_data, dict):
+                            raw_data = res_data.get("steps", res_data.get("sop", list(res_data.values())[0]))
+                        else:
+                            raw_data = res_data
+                            
                         st.session_state.messages.append({"role": "assistant", "content": raw_data})
                     except Exception as e:
                         st.session_state.messages.append({"role": "assistant", "content": f"系統解析錯誤: {str(e)}"})
