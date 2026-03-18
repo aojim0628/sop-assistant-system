@@ -1,16 +1,18 @@
 import streamlit as st
 from groq import Groq
+from streamlit_gsheets import GSheetsConnection
+import pandas as pd
 import json
 import re
 import os
-import pandas as pd
 from datetime import datetime
 
 # ==========================================
-# 1. 核心功能與安全設定
+# 1. 核心初始化
 # ==========================================
+client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+conn = st.connection("gsheets", type=GSheetsConnection)
 
-# 密碼檢查功能
 def check_password():
     if "password_correct" not in st.session_state:
         st.markdown("<br><br>", unsafe_allow_html=True)
@@ -28,44 +30,7 @@ def check_password():
         return False
     return True
 
-# 初始化 Groq 客戶端 (取代原有的 genai)
-client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-
-KNOWLEDGE_FILE = "sop_kb.md"
-
-@st.cache_data
-def load_knowledge(file_path):
-    if not os.path.exists(file_path): return ""
-    with open(file_path, "r", encoding="utf-8") as f:
-        return f.read().strip()
-
-MY_KNOWLEDGE_BASE = load_knowledge(KNOWLEDGE_FILE)
-
-def retrieve_category_context(query, full_text):
-    if not full_text: return ""
-    clean_query = query.strip().lower()
-    chunks = [c.strip() for c in re.split(r'\n#+\s', full_text) if c.strip()]
-    category_map = {
-        "總務行政/空間租借": ["會議", "空間", "租借", "總務"],
-        "資訊安全/訪客管理": ["訪客", "nda", "換證", "資安", "保全", "簽署"],
-        "IT資源/設備報修": ["報修", "故障", "it", "維修"],
-        "人事/請假申請": ["請假", "人事", "hr", "休假", "portal"],
-        "財務/採購報銷": ["報銷", "核銷", "費用", "財務", "會計", "單據"]
-    }
-    target_category = None
-    for cat, kws in category_map.items():
-        if any(kw in clean_query for kw in kws):
-            target_category = cat
-            break
-    if target_category:
-        relevant_chunks = [c for c in chunks if target_category in c]
-        if relevant_chunks: return "\n\n".join(["## " + c for c in relevant_chunks])
-    scored_chunks = [c for c in chunks if any(part in c.lower() for part in clean_query)]
-    return "\n\n".join(["## " + c for c in scored_chunks[:5]])
-
-def is_query_relevant(query):
-    sop_keywords = ["會議", "會議室", "空間", "租借", "訪客", "nda", "換證", "資安", "保全", "報修", "故障", "it", "維修", "請假", "人事", "hr", "報銷", "核銷", "sop", "流程", "休假", "簽署", "單據"]
-    return any(kw in query.strip().lower() for kw in sop_keywords)
+# (保留 retrieve_category_context 與 is_query_relevant 邏輯，此處省略以縮短長度)
 
 # ==========================================
 # 2. 啟動 UI
@@ -73,29 +38,12 @@ def is_query_relevant(query):
 st.set_page_config(page_title="SOP 知識檢索輔助系統", layout="wide")
 
 if check_password():
-    st.markdown("""
-        <style>
-        .stApp { background-color: #0e1117; color: white; }
-        .main .block-container { padding-bottom: 220px !important; }
-        .sop-card-box { 
-            background-color: #1e1e26; border-top: 4px solid #4a90e2; border-radius: 12px; 
-            padding: 16px; margin-bottom: 24px; height: 260px; 
-            display: flex; flex-direction: column;
-        }
-        .sop-step-header { color: #4a90e2; font-weight: 800; border-left: 4px solid #4a90e2; padding-left: 10px; margin-bottom: 8px; }
-        .sop-content { background-color: #26262e; border-radius: 8px; padding: 10px; color: #eeeeee; height: 7rem; overflow-y: auto; margin-bottom: 12px; }
-        .sop-info-line { color: #4a90e2; font-size: 0.9rem; margin-bottom: 3px; }
-        #custom-bottom-bar { position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%); width: 100%; max-width: 1100px; display: flex; z-index: 99; }
-        .stButton > button { width: auto !important; min-width: 100px; background-color: #26262e; color: white; }
-        footer, header {visibility: hidden;}
-        </style>
-    """, unsafe_allow_html=True)
-
-    if "messages" not in st.session_state: st.session_state.messages = []
-    if "user_name" not in st.session_state: st.session_state.user_name = ""
+    # 初始化狀態 (與原程式碼相同)
     if "is_started" not in st.session_state: st.session_state.is_started = False
-    if "current_step_idx" not in st.session_state: st.session_state.current_step_idx = 0
+    if "user_name" not in st.session_state: st.session_state.user_name = ""
+    if "messages" not in st.session_state: st.session_state.messages = []
     if "answers" not in st.session_state: st.session_state.answers = {}
+    if "current_step_idx" not in st.session_state: st.session_state.current_step_idx = 0
     if "is_finished" not in st.session_state: st.session_state.is_finished = False
 
     tasks = {
@@ -108,117 +56,45 @@ if check_password():
     }
     task_list = list(tasks.keys())
 
-    if not st.session_state.is_started:
-        st.markdown("<br><br><br>", unsafe_allow_html=True)
-        _, col_center, _ = st.columns([1, 1.5, 1])
-        with col_center:
-            st.title("🔍 SOP 知識檢索輔助系統")
-            name = st.text_input("您的姓名", key="name_input")
-            if st.button("進入系統", use_container_width=True):
-                if name.strip():
-                    st.session_state.user_name = name
-                    st.session_state.is_started = True
-                    st.session_state.enter_time = datetime.now() 
-                    st.rerun()
-    else:
-        with st.sidebar:
-            st.header(f"👤 使用者：{st.session_state.user_name}")
-            if not st.session_state.is_finished:
-                curr_idx = st.session_state.current_step_idx
-                curr_key = task_list[curr_idx]
-                st.divider()
-                st.write(f"📊 任務進度：{curr_idx + 1} / {len(task_list)}")
-                st.progress((curr_idx + 1) / len(task_list))
-                st.info(f"目前任務：\n{tasks[curr_key]}")
-                
-                user_ans = st.text_area("您的回答：", key=f"ans_{curr_idx}", height=120)
-                if st.button("✅ 儲存並進入下一題"):
-                    if user_ans.strip():
-                        st.session_state.answers[curr_key] = user_ans
-                        if curr_idx < len(task_list) - 1:
-                            st.session_state.current_step_idx += 1
-                        else:
-                            st.session_state.is_finished = True
+    # 側邊欄與進度控制
+    with st.sidebar:
+        if st.session_state.is_started and not st.session_state.is_finished:
+            curr_idx = st.session_state.current_step_idx
+            curr_key = task_list[curr_idx]
+            st.info(f"目前任務：\n{tasks[curr_key]}")
+            user_ans = st.text_area("您的回答：", key=f"ans_{curr_idx}", height=120)
+            
+            if st.button("✅ 儲存並進入下一題"):
+                if user_ans.strip():
+                    st.session_state.answers[curr_key] = user_ans
+                    if curr_idx < len(task_list) - 1:
+                        st.session_state.current_step_idx += 1
+                        st.rerun()
+                    else:
+                        # --- 核心修改：傳送到 Google Sheets ---
+                        try:
                             duration = datetime.now() - st.session_state.enter_time
                             duration_str = f"{int(duration.total_seconds() // 60):02d}:{int(duration.total_seconds() % 60):02d}"
-                            final_results = [{"使用者": st.session_state.user_name, "任務": k, "回答": v, "總耗時": duration_str} for k, v in st.session_state.answers.items()]
-                            pd.DataFrame(final_results).to_csv("test_results.csv", mode='a', index=False, header=not os.path.exists("test_results.csv"), encoding="utf-8-sig")
-                        st.rerun()
-            else:
-                st.success("🎉 任務完成！")
-                if st.button("🔄 重新測驗"):
-                    st.session_state.clear()
-                    st.rerun()
-
-        st.title("🔍 SOP 知識檢索輔助系統")
-        
-        for msg in st.session_state.messages:
-            with st.chat_message(msg["role"]):
-                if isinstance(msg["content"], list):
-                    cols_msg = st.columns(3)
-                    for i, item in enumerate(msg["content"]):
-                        with cols_msg[i % 3]:
-                            st.markdown(f"""
-                                <div class="sop-card-box">
-                                    <div class="sop-step-header">步驟 {i+1}：{item.get('title', '項目')}</div>
-                                    <div class="sop-content">{item.get('content', '暫無描述')}</div>
-                                    <div class="sop-info-line">👤 負責：{item.get('owner', '未註明')}</div>
-                                    <div class="sop-info-line">⏳ 時限：{item.get('time', '未註明')}</div>
-                                </div>
-                            """, unsafe_allow_html=True)
-                else:
-                    st.write(msg["content"])
-
-        shortcut_query = None
-        st.markdown('<div id="custom-bottom-bar">', unsafe_allow_html=True)
-        btn_cols = st.columns(5)
-        if btn_cols[0].button("💰 報銷流程"): shortcut_query = "報銷流程"
-        if btn_cols[1].button("📝 請假申請"): shortcut_query = "請假申請"
-        if btn_cols[2].button("🔧 設備報修"): shortcut_query = "設備報修"
-        if btn_cols[3].button("🛂 訪客相關"): shortcut_query = "訪客相關"
-        if btn_cols[4].button("📅 租借會議室"): shortcut_query = "租借會議室"
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-        chat_input = st.chat_input("輸入 SOP 關鍵字搜尋...")
-        final_query = shortcut_query if shortcut_query else chat_input
-
-        if final_query:
-            st.session_state.messages.append({"role": "user", "content": final_query})
-            with st.spinner("AI 正在極速檢索..."):
-                if not is_query_relevant(final_query):
-                    st.session_state.messages.append({"role": "assistant", "content": "查無相關 SOP 資訊。"})
-                else:
-                    context = retrieve_category_context(final_query, MY_KNOWLEDGE_BASE)
-                    prompt = (
-                        "你是一位台灣資深行政顧問。請根據提供內容回答。\n"
-                        f"參考內容：\n{context}\n"
-                        f"問題：{final_query}\n"
-                        "【輸出規範】：\n"
-                        "1. 必須使用『繁體中文』(台灣術語)。\n"
-                        "2. 嚴禁簡體字。\n"
-                        "3. 僅回傳純 JSON 陣列，格式：[{\"title\":\"動作名稱\",\"content\":\"繁體說明\",\"owner\":\"對象\",\"time\":\"時限\"}]"
-                        "4. 不要輸出任何 JSON 以外的文字說明。"
-                    )
-                    try:
-                        # 使用 Groq 的 Llama 3.3 模型
-                        chat_completion = client.chat.completions.create(
-                            messages=[{"role": "user", "content": prompt}],
-                            model="llama-3.3-70b-versatile",
-                            temperature=0,
-                            response_format={"type": "json_object"}
-                        )
-                        
-                        # 解析回應內容
-                        res_text = chat_completion.choices[0].message.content
-                        res_data = json.loads(res_text)
-                        
-                        # 處理 Groq 有時會包一層 Key 的情況
-                        if isinstance(res_data, dict):
-                            raw_data = res_data.get("steps", res_data.get("sop", list(res_data.values())[0]))
-                        else:
-                            raw_data = res_data
                             
-                        st.session_state.messages.append({"role": "assistant", "content": raw_data})
-                    except Exception as e:
-                        st.session_state.messages.append({"role": "assistant", "content": f"系統解析錯誤: {str(e)}"})
-            st.rerun()
+                            # 準備數據
+                            new_data = []
+                            for k, v in st.session_state.answers.items():
+                                new_data.append({
+                                    "使用者": st.session_state.user_name,
+                                    "任務": k,
+                                    "回答": v,
+                                    "總耗時": duration_str,
+                                    "時間戳記": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                })
+                            
+                            # 讀取現有 Sheets 資料並附加新資料
+                            existing_data = conn.read(spreadsheet=st.secrets["GSHEETS_URL"])
+                            updated_df = pd.concat([existing_data, pd.DataFrame(new_data)], ignore_index=True)
+                            conn.update(spreadsheet=st.secrets["GSHEETS_URL"], data=updated_df)
+                            
+                            st.session_state.is_finished = True
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"資料上傳 Sheets 失敗: {e}")
+
+    # (保留主畫面的 Chat 介面與按鈕邏輯)

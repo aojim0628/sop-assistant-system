@@ -1,3 +1,4 @@
 streamlit
 groq
 pandas
+st-gsheets-connection
