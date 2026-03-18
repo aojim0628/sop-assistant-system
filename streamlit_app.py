@@ -36,7 +36,7 @@ genai.configure(api_key=GEMINI_API_KEY)
 # 修正模型名稱：改用最穩定的 1.5-flash 或最新的 2.0-flash-exp
 # 建議先用 'gemini-1.5-flash'，這是目前最通用的
 # 加上最新的小版本號，這通常能解決 404 問題
-model = genai.GenerativeModel('gemini-1.5-flash-8b')
+model = genai.GenerativeModel('gemini-1.5-flash-pro')
 
 KNOWLEDGE_FILE = "sop_kb.md"
 
