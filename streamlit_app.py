@@ -1,6 +1,5 @@
 import streamlit as st
 from groq import Groq
-import gspread
 import pandas as pd
 import json
 import re
@@ -8,35 +7,16 @@ import os
 from datetime import datetime
 
 # ==========================================
-# 1. 基礎設定與 Google 連線
+# 1. 系統初始化與 AI 設定
 # ==========================================
 st.set_page_config(page_title="SOP 知識檢索輔助系統", layout="wide")
 
-# 初始化 Google Sheets 授權
-@st.cache_resource
-def get_gsheets_client():
-    try:
-        # 從 Secrets 讀取多行 JSON 字串
-        service_account_info = json.loads(st.secrets["GOOGLE_SERVICE_ACCOUNT"])
-        return gspread.service_account_from_dict(service_account_info)
-    except Exception as e:
-        st.error(f"❌ JSON 格式解析失敗，請檢查 Secrets 裡面的三個單引號是否正確。錯誤: {e}")
-        st.stop()
-
-# 建立連線
-try:
-    gc = get_gsheets_client()
-    sh = gc.open_by_url(st.secrets["GSHEETS_URL"])
-    # 嘗試抓取第一個分頁
-    try:
-        worksheet = sh.get_worksheet(0)
-    except:
-        worksheet = sh.sheet1
-except Exception as e:
-    st.error(f"❌ 雲端資料庫連線失敗: {e}\n\n請檢查：\n1. 網址是否正確\n2. 是否已『共用』權限給 JSON 裡的 client_email")
+# 檢查必要的 Secrets (只需 Groq)
+if "GROQ_API_KEY" not in st.secrets:
+    st.error("❌ 找不到 GROQ_API_KEY，請在 Streamlit Cloud Secrets 中設定。")
     st.stop()
 
-# 初始化 AI
+# 初始化 Groq
 client = Groq(api_key=st.secrets["GROQ_API_KEY"])
 
 # ==========================================
@@ -79,13 +59,14 @@ def is_query_relevant(query):
     return any(kw in query.strip().lower() for kw in sop_keywords)
 
 # ==========================================
-# 3. 權限與 UI
+# 3. 密碼存取控制
 # ==========================================
 if "password_correct" not in st.session_state:
     st.markdown("<br><br>", unsafe_allow_html=True)
     _, col_pw, _ = st.columns([1, 1, 1])
     with col_pw:
         st.subheader("🔐 系統存取控制")
+        # 預設密碼為 ntue123 或從 Secrets 讀取
         password = st.text_input("請輸入訪問密碼", type="password")
         if st.button("確認"):
             if password == st.secrets.get("ACCESS_PASSWORD", "ntue123"):
@@ -95,7 +76,9 @@ if "password_correct" not in st.session_state:
                 st.error("密碼錯誤！")
     st.stop()
 
-# 密碼正確後的樣式
+# ==========================================
+# 4. UI 樣式與實驗流程
+# ==========================================
 st.markdown("""
     <style>
     .stApp { background-color: #0e1117; color: white; }
@@ -113,7 +96,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# 初始化實驗數據變數
 if "messages" not in st.session_state: st.session_state.messages = []
 if "is_started" not in st.session_state: st.session_state.is_started = False
 if "current_step_idx" not in st.session_state: st.session_state.current_step_idx = 0
@@ -130,9 +112,7 @@ tasks = {
 }
 task_list = list(tasks.keys())
 
-# ==========================================
-# 4. 實驗流程控制
-# ==========================================
+# 進入畫面
 if not st.session_state.is_started:
     st.markdown("<br><br><br>", unsafe_allow_html=True)
     _, col_center, _ = st.columns([1, 1.5, 1])
@@ -146,6 +126,7 @@ if not st.session_state.is_started:
                 st.session_state.enter_time = datetime.now() 
                 st.rerun()
 else:
+    # 側邊欄：進度與結果
     with st.sidebar:
         st.header(f"👤：{st.session_state.user_name}")
         if not st.session_state.is_finished:
@@ -154,7 +135,7 @@ else:
             st.divider()
             st.write(f"📊 任務進度：{curr_idx + 1} / {len(task_list)}")
             st.progress((curr_idx + 1) / len(task_list))
-            st.info(f"任務內容：\n{tasks[curr_key]}")
+            st.info(f"任務：{tasks[curr_key]}")
             
             user_ans = st.text_area("您的回答：", key=f"ans_{curr_idx}", height=120)
             if st.button("✅ 儲存並下一題"):
@@ -164,29 +145,28 @@ else:
                         st.session_state.current_step_idx += 1
                         st.rerun()
                     else:
-                        # 任務全結束：自動上傳
-                        try:
-                            with st.spinner("💾 正在自動同步實驗數據..."):
-                                duration = datetime.now() - st.session_state.enter_time
-                                duration_str = f"{int(duration.total_seconds() // 60):02d}:{int(duration.total_seconds() % 60):02d}"
-                                rows = []
-                                for k, v in st.session_state.answers.items():
-                                    rows.append([
-                                        st.session_state.user_name, k, v, duration_str, 
-                                        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                    ])
-                                worksheet.append_rows(rows)
-                                st.session_state.is_finished = True
-                                st.rerun()
-                        except Exception as e:
-                            st.error(f"同步失敗: {e}")
+                        st.session_state.is_finished = True
+                        st.rerun()
         else:
-            st.success("🎉 測驗完成！數據已自動同步。")
+            st.success("🎉 測驗完成！請下載結果交給研究員。")
+            duration = datetime.now() - st.session_state.enter_time
+            duration_str = f"{int(duration.total_seconds() // 60):02d}:{int(duration.total_seconds() % 60):02d}"
+            
+            res_df = pd.DataFrame([{"任務": k, "回答": v} for k, v in st.session_state.answers.items()])
+            st.dataframe(res_df, use_container_width=True)
+            
+            st.download_button(
+                label="📥 下載實驗結果 CSV",
+                data=res_df.to_csv(index=False).encode('utf-8-sig'),
+                file_name=f"result_{st.session_state.user_name}.csv",
+                mime="text/csv"
+            )
+            
             if st.button("🔄 重新開始"):
                 st.session_state.clear()
                 st.rerun()
 
-    # 主畫面聊天室
+    # 主畫面：對話檢索
     st.title("🔍 SOP 知識檢索輔助系統")
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
@@ -205,7 +185,7 @@ else:
             else:
                 st.write(msg["content"])
 
-    # 快捷鍵按鈕
+    # 快捷按鈕
     shortcut_query = None
     st.markdown('<div id="custom-bottom-bar">', unsafe_allow_html=True)
     btn_cols = st.columns(5)
@@ -221,7 +201,7 @@ else:
 
     if final_query:
         st.session_state.messages.append({"role": "user", "content": final_query})
-        with st.spinner("AI 正在檢索..."):
+        with st.spinner("AI 正在極速檢索..."):
             if not is_query_relevant(final_query):
                 st.session_state.messages.append({"role": "assistant", "content": "查無相關 SOP 資訊。"})
             else:
