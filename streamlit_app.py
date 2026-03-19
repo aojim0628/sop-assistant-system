@@ -149,20 +149,42 @@ else:
                         st.rerun()
         else:
             st.success("🎉 測驗完成！請下載結果交給研究員。")
-            duration = datetime.now() - st.session_state.enter_time
-            duration_str = f"{int(duration.total_seconds() // 60):02d}:{int(duration.total_seconds() % 60):02d}"
             
-            res_df = pd.DataFrame([{"任務": k, "回答": v} for k, v in st.session_state.answers.items()])
+            # 計算總耗時
+            duration = datetime.now() - st.session_state.enter_time
+            minutes = int(duration.total_seconds() // 60)
+            seconds = int(duration.total_seconds() % 60)
+            duration_str = f"{minutes:02d}:{seconds:02d}"
+            
+            # 建立包含姓名與耗時的 DataFrame
+            res_data = []
+            for k, v in st.session_state.answers.items():
+                res_data.append({
+                    "受測者姓名": st.session_state.user_name,
+                    "任務序號": k,
+                    "回答內容": v,
+                    "總耗時(分:秒)": duration_str,
+                    "完成時間": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                })
+            
+            res_df = pd.DataFrame(res_data)
+            
+            # 預覽數據
+            st.write("### 數據預覽")
             st.dataframe(res_df, use_container_width=True)
             
+            # 下載按鈕 (加上 utf-8-sig 確保 Excel 打開不會亂碼)
+            csv_data = res_df.to_csv(index=False).encode('utf-8-sig')
             st.download_button(
                 label="📥 下載實驗結果 CSV",
-                data=res_df.to_csv(index=False).encode('utf-8-sig'),
-                file_name=f"result_{st.session_state.user_name}.csv",
-                mime="text/csv"
+                data=csv_data,
+                file_name=f"實驗結果_{st.session_state.user_name}_{datetime.now().strftime('%m%d_%H%M')}.csv",
+                mime="text/csv",
+                use_container_width=True
             )
             
-            if st.button("🔄 重新開始"):
+            st.divider()
+            if st.button("🔄 重新開始 (清除所有數據)"):
                 st.session_state.clear()
                 st.rerun()
 
@@ -201,7 +223,7 @@ else:
 
     if final_query:
         st.session_state.messages.append({"role": "user", "content": final_query})
-        with st.spinner("AI 正在極速檢索..."):
+        with st.spinner("正在檢索中..."):
             if not is_query_relevant(final_query):
                 st.session_state.messages.append({"role": "assistant", "content": "查無相關 SOP 資訊。"})
             else:
